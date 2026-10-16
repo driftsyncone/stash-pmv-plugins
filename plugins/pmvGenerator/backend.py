@@ -21,6 +21,15 @@ Called through Stash's `runPluginOperation` (interface: raw):
       args:   {"mode": "audio_chunk", "id": "<id>", "offset": 0}
       output: {"data": "<base64>", "size": <bytes>, "last": bool}   the last piece removes the file
 
+* mode "songs_list": the sound files in "PMV Generator/Songs" (and its subfolders), newest first.
+      args:   {"mode": "songs_list"}
+      output: {"dir": "...", "songs": [{"path": "<relative>", "name": "...", "size": <bytes>, "mtime": <unix s>}]}
+
+* mode "song_open": one of those files, handed out like an extracted sound (fetch it with "audio_chunk").
+      args:   {"mode": "song_open", "path": "<relative, as listed>"}
+      output: {"id": "<id>", "size": <bytes>, "name": "...", "ext": "mp3"}
+  Only files inside that folder; the file is copied to a temporary one, the original stays.
+
 * mode "live_start": the generator listens to one app on this PC (e.g. Spotify) – only that app,
   games and the rest stay out (Windows process loopback, Windows 10 build 20348+ / 11).
       args:   {"mode": "live_start", "app": "Spotify"}
@@ -243,6 +252,47 @@ def audio_chunk(args):
     return {"data": base64.b64encode(data).decode("ascii"), "size": size, "last": last}
 
 
+SONG_EXT = {".m4a", ".mp3", ".wav", ".ogg", ".oga", ".opus", ".flac", ".aac", ".weba"}
+
+
+def songs_dir(stash):
+    return os.path.join(stash.target_dir(), "Songs")
+
+
+def songs_list(stash):
+    folder = songs_dir(stash)
+    songs = []
+    if os.path.isdir(folder):
+        for root, dirs, names in os.walk(folder):
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            for n in names:
+                if os.path.splitext(n)[1].lower() not in SONG_EXT or n.startswith("."):
+                    continue
+                full = os.path.join(root, n)
+                try:
+                    st = os.stat(full)
+                except OSError:
+                    continue
+                rel = os.path.relpath(full, folder).replace(os.sep, "/")
+                songs.append({"path": rel, "name": os.path.splitext(n)[0], "size": st.st_size, "mtime": int(st.st_mtime)})
+    songs.sort(key=lambda x: -x["mtime"])
+    return {"dir": folder, "songs": songs}
+
+
+def song_open(stash, args):
+    folder = os.path.realpath(songs_dir(stash))
+    rel = str(args.get("path") or "")
+    full = os.path.realpath(os.path.join(folder, rel))
+    if not rel or os.path.commonpath([folder, full]) != folder or not os.path.isfile(full):
+        raise ValueError("no such song in PMV Generator/Songs")
+    ext = os.path.splitext(full)[1].lower()
+    if ext not in SONG_EXT:
+        raise ValueError("not a sound file")
+    aid = os.urandom(8).hex()
+    shutil.copyfile(full, audio_tmp(aid))
+    return {"id": aid, "size": os.path.getsize(full), "name": os.path.splitext(os.path.basename(full))[0], "ext": ext[1:]}
+
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 APP_NAME = re.compile(r"^[A-Za-z0-9 ._-]{1,40}$")
 
@@ -334,6 +384,10 @@ def main():
             out = extract_audio(Stash(data.get("server_connection")), args)
         elif mode == "audio_chunk":
             out = audio_chunk(args)
+        elif mode == "songs_list":
+            out = songs_list(Stash(data.get("server_connection")))
+        elif mode == "song_open":
+            out = song_open(Stash(data.get("server_connection")), args)
         elif mode == "live_start":
             out = live_start(args)
         elif mode == "rg_api":

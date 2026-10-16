@@ -1,5 +1,23 @@
 # Stash plugins: Stash UI, PMV Generator, Media Storm, RedTok
 
+> **This is a fork** of [anonym88312/stash-pmv-plugins](https://github.com/anonym88312/stash-pmv-plugins)
+> that adds an **Autoblow VacuGlide** output to the PMV Generator (branch `vacuglide`,
+> PMV Generator `2.32.1-vg.9`). Everything else is upstream, unchanged.
+>
+> - **Play on: The Handy / VacuGlide / Both**: the show's funscript is uploaded to the
+>   VacuGlide as an Autoblow sync script and follows the show's clock. Defaults suited
+>   to the VacuGlide (Sharp, Full strokes, top speed 600 /s).
+> - The device token comes from the [VacuGlide Sync](https://github.com/driftsyncone/stash-plugins#vacuglide-sync)
+>   plugin's settings, so set that up first.
+> - [Beat Bar](https://github.com/driftsyncone/stash-plugins#beat-bar) themes can be
+>   drawn over the show, on screen or in the recording.
+> - A **Stash songs** tab (sound files in the library's "PMV Generator/Songs" folder), a song list that
+>   mixes Stash songs and video rips, and an "Only music videos" filter.
+>
+> Install by copying `plugins/pmvGenerator` from this branch into your Stash plugins
+> folder in place of the upstream one. Updating PMV Generator from its package source
+> replaces it with upstream again. Unofficial; not affiliated with Autoblow. MIT, like upstream.
+
 Four plugins for [Stash](https://github.com/stashapp/stash).
 
 | Plugin | What it is |

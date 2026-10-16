@@ -9,6 +9,9 @@ import { gql, favoriteTagId, countItems, pluginConfig, setPluginConfig } from ".
 import { analyzeBars } from "../bars.js";
 import { buildFunscript, FS_DEFAULTS } from "../funscriptgen.js";
 import { attachHandy, getHandy } from "../interactive.js";
+import { attachVacuglide, vacuglideToken } from "../vacuglide.js";
+import { BeatBar, beatBarSettings, loadBeatBarThemes, strokeBeats } from "../beatbar.js";
+import { listStashSongs, openStashSong } from "../stashsongs.js";
 import { analyzeFile, analyzeBuffer, sliceBuffer, songFromFrames, rescale, shift } from "../beats.js";
 import { extractAudio, parseTime, fmtTime } from "../audiox.js";
 import { scanPmv } from "../pmvscan.js";
@@ -29,8 +32,11 @@ const SCENE_LINK = window.PMVGEN_SCENE_LINK || ((id) => "/scenes/" + id);
 
 const DEFAULTS = {
   ...FS_DEFAULTS, // the funscript for The Handy (fsOn, fsPace, fsSize, fsWhere, fsStyle, fsRests, fsAccent, fsSpeed)
+  fsDevice: "handy", // which device plays the funscript: handy | vacuglide | both
+  musicOnly: true, // the library pickers (PMV as template, music from a video) list only music videos (MUSIC_TAGS)
+  fsBar: "off", // the Beat Bar plugin's bar over the show: off | screen | rec (drawn into the picture, so recorded too)
   glass: true, // liquid glass look (own switch, independent of Stash UI's)
-  mode: "song", // song = your own song(s), plex = music from Plex, tpl = use a PMV as template
+  mode: "song", // song = your own song(s), stash = pick one kept in Stash (then it's "song"), plex = music from Plex, tpl = use a PMV as template
   shuffle: false, // several songs: shuffled
   plexWhat: "follow", // follow = visualize what plays in Plex, list = a Plex playlist, all = all music shuffled
   plexList: "", // chosen Plex playlist
@@ -177,6 +183,19 @@ const SECTIONS = [
 const CHEVRON = `<svg class="kb-pmvg-chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
 // A row with a switch; path = "bestSpots" or "fx.flash"
+// Tags that make a video a music source (PMVs, HMVs, fap/cock hero, beat meters …), matched by name in any case.
+// Not plain "Music": scrapers put it on ordinary scenes with background music (e.g. a studio's whole catalogue).
+const MUSIC_TAGS = "(?i)^(pmv|hmv|pmv compilation|fap ?hero|fap-hero|cock ?hero|cock-hero|beat meter|beat[ -]based|music-based|beat script \\(auto\\)|pmv generator|worldpmvgames[0-9]*)$";
+let musicTagsP = null;
+function musicTagIds() {
+  if (!musicTagsP) {
+    musicTagsP = gql(`query($r: String!) { findTags(tag_filter: { name: { value: $r, modifier: MATCHES_REGEX } }, filter: { per_page: -1 }) { tags { id } } }`, { r: MUSIC_TAGS })
+      .then((d) => d.findTags.tags.map((t) => t.id))
+      .catch((e) => ((musicTagsP = null), Promise.reject(e)));
+  }
+  return musicTagsP;
+}
+const MUSIC_SW = () => sw("musicOnly", "Only music videos", "Tagged PMV, HMV, Fap Hero, Cock Hero, Beat meter, Beat script (auto) … – off: every video");
 const sw = (path, name, desc) =>
   `<label class="kb-pmvg-opt"><span><b>${esc(name)}</b>${desc ? `<small>${esc(desc)}</small>` : ""}</span>` +
   `<span class="kb-switch"><input type="checkbox" data-t="${path}"><i></i></span></label>`;
@@ -232,7 +251,8 @@ export function render(main) {
       <div class="kb-pmvg-main">
       <section class="kb-card kb-pmvg-song">
         <h2><span class="kb-pmvg-no">1</span>Music</h2>
-        <div class="kb-seg" data-seg="mode"><button type="button" data-v="song">Your song</button><button type="button" data-v="plex">Plex</button><button type="button" data-v="live">Spotify &amp; apps</button><button type="button" data-v="tpl">PMV as template</button></div>
+        <div class="kb-seg" data-seg="mode"><button type="button" data-v="song">Your song</button><button type="button" data-v="stash" title="Songs kept in Stash (PMV Generator/Songs)">Stash songs</button><button type="button" data-v="plex">Plex</button><button type="button" data-v="live">Spotify &amp; apps</button><button type="button" data-v="tpl">PMV as template</button></div>
+        <div class="kb-pmvg-queue" data-queue hidden></div>
         <div data-tplpane hidden>
           <p class="kb-hint">An existing PMV is analyzed: music, every cut, the layouts (split screens) and flashes are taken over – only the content comes from your library. Effects like glitch or text are burned into the picture; instead, your effects run at the same moments.</p>
           <div data-tplpick>
@@ -241,6 +261,7 @@ export function render(main) {
               <button class="kb-btn" type="button" data-tplfile>${icon("film")}Choose file</button>
               <input type="file" accept="video/*,.mp4,.webm,.mkv,.mov" data-tplinput hidden>
             </div>
+            <div class="kb-pmvg-opts">${MUSIC_SW()}</div>
             <div class="kb-pmvg-tplist" data-tplist><div class="kb-loading">Loading …</div></div>
           </div>
           <div class="kb-pmvg-tplprog" data-tplprog hidden>
@@ -284,6 +305,15 @@ export function render(main) {
           <label class="kb-pmvg-liveapp"><span class="kb-lab-t">App</span><input class="kb-field" data-liveapp spellcheck="false" placeholder="Spotify"><small class="kb-hint">the program's name, as in the Task Manager (e.g. Spotify, TIDAL, foobar2000)</small></label>
           <div class="kb-pmvg-np" data-livenp></div>
         </div>
+        <div data-stashpane hidden>
+          <p class="kb-hint">Sound files in the library folder “PMV Generator/Songs” – where “Music from a video” keeps a song when you tick “Also keep the sound as a file”. Other songs you put there (MP3, M4A, WAV, OGG, FLAC) show up too. Picking one opens it under “Your song”; + puts it into the song list instead, for several songs in a row.</p>
+          <div class="kb-pmvg-row">
+            <label class="kb-search kb-pmvg-tplq">${icon("search")}<input class="kb-field" type="search" data-sq placeholder="Search your songs …"></label>
+            <button class="kb-btn is-ghost" type="button" data-saddall title="Put every song shown into the song list">Add all</button>
+            <button class="kb-btn is-ghost" type="button" data-sreload title="Read the folder again">Refresh</button>
+          </div>
+          <div class="kb-pmvg-songlist" data-slist></div>
+        </div>
         <div data-songpane>
         <label class="kb-pmvg-drop" data-drop>
           <input type="file" accept="audio/*,video/*,.mp3,.m4a,.wav,.ogg,.flac,.opus,.mp4,.webm,.mov,.m4v" data-file multiple hidden>
@@ -292,6 +322,7 @@ export function render(main) {
         <details class="kb-pmvg-fromvid" data-fromvid>
           <summary>${icon("film")}Music from a video in your library</summary>
           <label class="kb-search kb-pmvg-tplq" data-vqwrap>${icon("search")}<input class="kb-field" type="search" data-vq placeholder="Search a video …"></label>
+          <div class="kb-pmvg-opts" data-vmusic>${MUSIC_SW()}</div>
           <div class="kb-pmvg-tplist" data-vlist></div>
           <div class="kb-pmvg-vpick" data-vpick hidden>
             <div class="kb-pmvg-songhead"><b data-vname></b><span data-vdur></span></div>
@@ -300,8 +331,8 @@ export function render(main) {
               <label>to <input class="kb-field" data-vto inputmode="numeric"></label>
               <small class="kb-hint" data-vhint></small>
             </div>
-            <label class="kb-check"><input type="checkbox" data-vsave> Also keep the sound as a file (library folder “PMV Generator/Songs”)</label>
-            <div class="kb-card-acts"><button class="kb-btn is-ghost" type="button" data-vback>Other video</button><span class="kb-spacer"></span><button class="kb-btn is-primary" type="button" data-vgo>${icon("music")}Use this music</button></div>
+            <label class="kb-check"><input type="checkbox" data-vsave> Also keep the sound as a file (library folder “PMV Generator/Songs”) – then it's under Stash songs next time; with “Add to song list” it is saved right away</label>
+            <div class="kb-card-acts"><button class="kb-btn is-ghost" type="button" data-vback>Other video</button><span class="kb-spacer"></span><button class="kb-btn" type="button" data-vadd title="Several songs in a row: this part of this video goes into the song list (the sound is cut out when its turn comes), then pick the next video">${icon("plus")}Add to song list</button><button class="kb-btn is-primary" type="button" data-vgo>${icon("music")}Use this music</button></div>
             <div class="kb-job-bar" data-vbarwrap hidden><i data-vbar style="width:0%"></i></div>
           </div>
         </details>
@@ -563,8 +594,13 @@ export function render(main) {
         <div class="kb-pmvg-sec" data-sec="fs">
           ${secHead("fs")}
           <div class="kb-pmvg-pane" id="pmvg-pane-fs" data-pane="fs">
-            <div class="kb-pmvg-opts">${sw("fsOn", "Play a funscript with the song", "Built from the song's beats and energy and played on The Handy together with the PMV (connection key: Stash UI → Settings → Interactive). Not with Plex or a live app – only with your own song files. After the show you can save it as a .funscript")}</div>
+            <div class="kb-pmvg-opts">${sw("fsOn", "Play a funscript with the song", "Built from the song's beats and energy and played on The Handy or the VacuGlide together with the PMV. Not with Plex or a live app – only with your own song files. After the show you can save it as a .funscript")}</div>
+            <span class="kb-lab-t">Beat bar <small>– the Beat Bar plugin's bar over the show</small></span>
+            <div class="kb-seg" data-seg="fsBar"><button type="button" data-v="off">Off</button><button type="button" data-v="screen" title="Over the picture, not in the recording">On screen</button><button type="button" data-v="rec" title="Drawn into the picture, so a recording has it too">In the recording too</button></div>
+            <p class="kb-hint">Markers for the funscript's strokes when it's on, otherwise for the song's beats. Look, size and theme come from the Beat Bar plugin (its settings, and the theme last picked on its bar in this browser). Needs that plugin installed and enabled.</p>
             <div data-fsbox>
+              <span class="kb-lab-t">Play on</span>
+              <div class="kb-seg" data-seg="fsDevice"><button type="button" data-v="handy" title="Connection key: Stash UI → Settings → Interactive">The Handy</button><button type="button" data-v="vacuglide" title="Device token: the VacuGlide Sync plugin's settings">VacuGlide</button><button type="button" data-v="both">Both</button></div>
               <span class="kb-lab-t">Pace <small>– strokes per beat</small></span>
               <div class="kb-seg" data-seg="fsPace"><button type="button" data-v="auto" title="Calm parts slow, loud parts and drops fast">Follow the song</button><button type="button" data-v="slow" title="One stroke every 2 beats">Slow</button><button type="button" data-v="normal" title="One stroke per beat">Normal</button><button type="button" data-v="fast" title="Two strokes per beat">Fast</button></div>
               <span class="kb-lab-t">Stroke size</span>
@@ -574,8 +610,9 @@ export function render(main) {
               <span class="kb-lab-t">Style</span>
               <div class="kb-seg" data-seg="fsStyle"><button type="button" data-v="sharp" title="Straight lines from beat to beat">Sharp</button><button type="button" data-v="smooth" title="Rounded, flowing strokes">Smooth</button></div>
               <div class="kb-pmvg-opts">${sw("fsRests", "Gentle in calm parts", "Quiet passages get slow, small strokes")}${sw("fsAccent", "Accents", "A bigger stroke on the first beat of each bar and on drops")}</div>
-              <div class="kb-pmvg-sound"><label class="kb-pmvg-range"><span>${icon("sliders")}Top speed</span><input type="range" min="100" max="600" step="25" data-r="fsSpeed" aria-label="Top speed of the script"><output data-ro="fsSpeed"></output></label></div>
+              <div class="kb-pmvg-sound"><label class="kb-pmvg-range"><span>${icon("sliders")}Top speed</span><input type="range" min="100" max="600" step="25" data-r="fsSpeed" aria-label="Top speed of the script"><output data-ro="fsSpeed" data-unit=" /s"></output></label></div>
               <p class="kb-hint">Top speed limits how fast the device is asked to move (units per second) – fast strokes get smaller instead. The script starts with the song; if it runs early or late, Stash UI's sync offset (Settings → Interactive) applies.</p>
+              <p class="kb-hint">VacuGlide: it plays speeds, not positions – a stroke's speed (units per second ÷ 6) is the motor speed, so 600 is its top speed, smaller strokes run slower, and the sync offset is VacuGlide Sync's. Sharp suits it better than Smooth (Smooth changes the speed 20 times a second). The first song takes a few seconds to upload before it moves.</p>
             </div>
           </div>
         </div>
@@ -629,6 +666,23 @@ export function render(main) {
   const $ = (s) => main.querySelector(s);
 
   // ---------- Show settings ----------
+
+  // The VacuGlide picked: the funscript settings that suit it (it plays speeds, see vacuglide.js) – full strokes
+  // so the speed follows the strokes per beat, its whole speed range, and sharp lines (smooth changes the speed
+  // 20 times a second). Back on The Handy alone, the settings from before come back.
+  const VG_FS = { fsStyle: "sharp", fsSize: "full", fsSpeed: 600 };
+  function vacuglideDefaults(before) {
+    const vg = (d) => d === "vacuglide" || d === "both";
+    if (vg(S.fsDevice) && !vg(before)) {
+      S.fsHandyPrev = Object.fromEntries(Object.keys(VG_FS).map((k) => [k, S[k]]));
+      Object.assign(S, VG_FS);
+      toast("Set for the VacuGlide: Sharp, Full strokes, Top speed 600 – change them if you like", "ok");
+    } else if (!vg(S.fsDevice) && vg(before) && S.fsHandyPrev) {
+      Object.assign(S, S.fsHandyPrev);
+      delete S.fsHandyPrev;
+      toast("Funscript settings for The Handy are back", "ok");
+    }
+  }
 
   function paintSegs() {
     main.querySelectorAll("[data-seg]").forEach((seg) => {
@@ -703,7 +757,7 @@ export function render(main) {
       look: look,
       frame: `${S.format === "window" ? "window shape" : S.format} · ${S.fit === "cover" ? "fill" : "fit"}${S.soft ? " · soft seams" : ""}`,
       sound: `Song ${S.songVol} · Clips ${S.fx.voice ? S.clipVol : "off"}`,
-      fs: S.fsOn ? `${S.fsPace === "auto" ? "follows the song" : S.fsPace} · ${S.fsSize === "auto" ? "auto size" : S.fsSize}` : "off",
+      fs: S.fsOn ? `${{ handy: "The Handy", vacuglide: "VacuGlide", both: "Handy + VacuGlide" }[S.fsDevice] || "The Handy"} · ${S.fsPace === "auto" ? "follows the song" : S.fsPace} · ${S.fsSize === "auto" ? "auto size" : S.fsSize}` : "off",
       out: [S.intro && "Intro", S.outro && "Outro", S.record && "Recording"].filter(Boolean).join(" · ") || "live only",
     };
     main.querySelectorAll("[data-tabsum]").forEach((s) => (s.textContent = tabSum[s.dataset.tabsum]));
@@ -738,7 +792,9 @@ export function render(main) {
     const b = e.target.closest("[data-seg] [data-v]");
     if (b) {
       const key = b.closest("[data-seg]").dataset.seg;
+      const before = S[key];
       S[key] = key === "quality" ? Number(b.dataset.v) : b.dataset.v;
+      if (key === "fsDevice" && before !== S[key]) vacuglideDefaults(before);
       save();
       paintSegs();
       if (key === "clipFrom") paintClipFrom();
@@ -824,6 +880,10 @@ export function render(main) {
     paintSegs();
     if (c.dataset.t === "fx.text" && S.fx.text) $("[data-words]").focus();
     if (c.dataset.t === "fav" || c.dataset.t === "markerSub") updateCount();
+    if (c.dataset.t === "musicOnly") {
+      if (S.mode === "tpl") listTemplates($("[data-tplq]").value.trim());
+      if ($("[data-fromvid]").open && !vScene) listVideos($("[data-vq]").value.trim());
+    }
     if (c.dataset.t === "stagesOn") {
       paintStages();
       updateCount();
@@ -1308,37 +1368,274 @@ export function render(main) {
     paintSong();
   };
 
-  // Music from a video in the library: ffmpeg (PMV Generator backend) cuts out the sound
-  let vScene = null;
-  let vSeq = 0;
-  async function listVideos(q) {
-    const seq = ++vSeq;
-    const box = $("[data-vlist]");
+  // Songs kept in Stash: listed once per visit of the tab (Refresh reads the folder again), filtered while typing;
+  // picking one loads it like a dropped file and switches to "Your song", where it then is.
+  let stashSongs = null;
+  let stashLoading = false;
+  async function listSongs(force) {
+    const box = $("[data-slist]");
+    if (stashLoading || (stashSongs && !force)) return paintSongs();
+    stashLoading = true;
+    box.innerHTML = `<div class="kb-loading">Loading …</div>`;
     try {
-      const d = await gql(`query($f: FindFilterType) { findScenes(filter: $f) { scenes { id title paths { screenshot } files { duration basename } } } }`, {
-        f: { q: q || undefined, per_page: 12, sort: q ? "title" : "last_played_at", direction: q ? "ASC" : "DESC" },
-      });
-      if (seq !== vSeq || !alive) return;
-      const list = d.findScenes.scenes;
-      box.innerHTML = list.length
-        ? list
-            .map((x) => {
-              const name = x.title || ((x.files[0] || {}).basename || "").replace(/\.[^.]+$/, "") || "Scene " + x.id;
-              const dur = (x.files[0] || {}).duration || 0;
-              return `<button type="button" class="kb-pmvg-tpl" data-vid="${x.id}" data-name="${esc(name)}" data-dur="${dur}">
-                ${x.paths.screenshot ? `<img src="${esc(x.paths.screenshot)}" alt="" loading="lazy">` : ""}
-                <span><b>${esc(name)}</b><small>${esc(fmtDuration(dur))}</small></span></button>`;
-            })
-            .join("")
-        : `<p class="kb-hint">Nothing found.</p>`;
+      stashSongs = (await listStashSongs(BACKEND)).songs;
+      if (alive) paintSongs();
     } catch (err) {
-      box.innerHTML = `<p class="kb-hint">Couldn't load the list: ${esc(err.message)}</p>`;
+      box.innerHTML = `<p class="kb-hint">Couldn't read the songs: ${esc(err.message)}</p>`;
+    } finally {
+      stashLoading = false;
     }
   }
+  function paintSongs() {
+    const box = $("[data-slist]");
+    if (!stashSongs) return;
+    const q = $("[data-sq]").value.trim().toLowerCase();
+    const list = q ? stashSongs.filter((x) => x.path.toLowerCase().includes(q)) : stashSongs;
+    box.innerHTML = list.length
+      ? list
+          .map((x) => {
+            const dir = x.path.includes("/") ? x.path.slice(0, x.path.lastIndexOf("/")) : "";
+            const ext = x.path.slice(x.path.lastIndexOf(".") + 1).toUpperCase();
+            const date = new Date(x.mtime * 1000).toLocaleDateString();
+            return `<button type="button" class="kb-pmvg-songrow" data-spath="${esc(x.path)}">${icon("music")}<span><b>${esc(x.name)}</b><small>${[dir, ext, fmtBytes(x.size), date].filter(Boolean).map(esc).join(" · ")}</small></span><i class="kb-pmvg-songbar"></i><span class="kb-btn is-ghost is-icon kb-pmvg-songadd" role="button" tabindex="0" data-sadd title="Put into the song list">${icon("plus")}</span></button>`;
+          })
+          .join("")
+      : `<p class="kb-hint">${stashSongs.length ? "No song matches." : "No songs there yet – use “Music from a video” under Your song with “Also keep the sound as a file”, or put sound files into PMV Generator/Songs."}</p>`;
+  }
+  let sqTimer;
+  $("[data-sq]").addEventListener("input", () => {
+    clearTimeout(sqTimer);
+    sqTimer = setTimeout(paintSongs, 150);
+  });
+  $("[data-sreload]").onclick = () => listSongs(true);
+  $("[data-saddall]").onclick = () => {
+    const q = $("[data-sq]").value.trim().toLowerCase();
+    const list = (stashSongs || []).filter((x) => !q || x.path.toLowerCase().includes(q));
+    if (list.length) queueAdd(list.map(stashTrack));
+  };
+
+  // ---------- Song list: several songs from Stash (kept songs, music from videos) in a row ----------
+  // Each entry is a playlist track (music.js) that fetches its sound only when its turn comes (the next one
+  // in the background), so a long list starts right away.
+  let queue = [];
+  const stashTrack = (x) => ({
+    name: x.name,
+    from: "Stash song",
+    key: "s:" + x.path,
+    load: async () => Object.assign(await analyzeFile(await openStashSong(x.path, { plugin: BACKEND })), { name: x.name }),
+  });
+  // Music from a video. Without "keep the sound": cut out when its turn comes. With it: cut out and saved to
+  // Stash right away (once – the list repeats, and the song is then also under Stash songs), the sound kept here.
+  const videoTrack = (v, start, end, save) => {
+    const t = {
+      name: v.name,
+      from: `from a video${start || end ? ` · ${fmtTime(start)}–${end ? fmtTime(end) : "end"}` : ""}`,
+      key: `v:${v.id}:${start}:${end}`,
+      state: "",
+    };
+    const extract = (keep) => extractAudio({ sceneId: v.id, start, end, save: keep, plugin: BACKEND });
+    const analyze = async (r) => Object.assign(await analyzeFile(new File([r.blob], v.name + ".m4a", { type: "audio/mp4" })), { name: v.name });
+    if (!save) {
+      t.load = async () => analyze(await extract(false));
+      return t;
+    }
+    t.state = "saving to Stash …";
+    const ripped = extract(true).then(
+      (r) => {
+        t.state = r.saved ? "saved to Stash" : "";
+        stashSongs = null; // the Stash songs tab reads the folder again
+        paintQueue();
+        return r;
+      },
+      (err) => {
+        t.state = "couldn't be saved – cut out when its turn comes";
+        paintQueue();
+        throw err;
+      }
+    );
+    ripped.catch(() => {});
+    t.load = async () => analyze(await ripped.catch(() => extract(false)));
+    return t;
+  };
+  function queueAdd(tracks) {
+    const have = new Set(queue.map((t) => t.key));
+    const fresh = tracks.filter((t) => !have.has(t.key));
+    queue.push(...fresh);
+    paintQueue();
+    toast(fresh.length === 1 ? `“${fresh[0].name}” is in the song list (${queue.length})` : `${fresh.length} songs added – ${queue.length} in the song list`, "ok");
+  }
+  function paintQueue() {
+    paintStart();
+    const box = $("[data-queue]");
+    box.hidden = !queue.length || (S.mode !== "song" && S.mode !== "stash");
+    if (!queue.length) return (box.innerHTML = "");
+    box.innerHTML = `<div class="kb-pmvg-queuehead"><b>${icon("music")}Song list · ${queue.length} ${queue.length === 1 ? "song" : "songs"}</b><span class="kb-spacer"></span>
+        <button class="kb-btn is-ghost" type="button" data-qclear>Clear</button>
+        <button class="kb-btn is-primary" type="button" data-qplay>${icon("play")}Play the list</button></div>
+      <ol class="kb-pmvg-queuelist">${queue
+        .map((t, i) => `<li><span><b>${esc(t.name)}</b><small>${esc([t.from, t.state].filter(Boolean).join(" · "))}</small></span><button class="kb-btn is-ghost is-icon" type="button" data-qdel="${i}" title="Take out">${icon("close")}</button></li>`)
+        .join("")}</ol>`;
+  }
+  let queueStarting = false;
+  $("[data-queue]").addEventListener("click", async (e) => {
+    const del = e.target.closest("[data-qdel]");
+    if (del) {
+      queue.splice(Number(del.dataset.qdel), 1);
+      return paintQueue();
+    }
+    if (e.target.closest("[data-qclear]")) {
+      queue = [];
+      return paintQueue();
+    }
+    const btn = e.target.closest("[data-qplay]");
+    if (btn) playQueue(btn);
+  });
+  // The song list becomes the songs of "Your song" (several: a playlist). → true when it's loaded
+  async function playQueue(btn) {
+    if (queueStarting || !queue.length) return false;
+    queueStarting = true;
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "Loading the first song …";
+    }
+    try {
+      const list = new Playlist(queue.slice(), { shuffle: !!S.shuffle });
+      const first = await list.first();
+      if (!alive) return;
+      if (songFull && songFull.media) URL.revokeObjectURL(songFull.media);
+      playlist = queue.length > 1 ? list : null;
+      song = first;
+      songFull = playlist ? null : first.long ? { frames: first.frames, media: first.media, duration: first.duration, name: first.name } : { buffer: first.buffer, name: first.name };
+      queue = [];
+      S.mode = "song";
+      save();
+      paintSegs();
+      paintMode();
+      $("[data-fromvid]").open = false;
+      paintSong();
+      paintQueue();
+      return true;
+    } catch (err) {
+      errorToast(err.name === "EncodingError" ? new Error("The browser can't read the sound of the first song") : err, "Song list");
+      return false;
+    } finally {
+      queueStarting = false;
+      if (btn && btn.isConnected) {
+        btn.disabled = false;
+        btn.innerHTML = `${icon("play")}Play the list`;
+      }
+      paintStart();
+    }
+  }
+  let songOpening = false;
+  $("[data-slist]").addEventListener("click", async (e) => {
+    const row = e.target.closest("[data-spath]");
+    if (row && e.target.closest("[data-sadd]")) {
+      const x = stashSongs.find((y) => y.path === row.dataset.spath);
+      if (x) queueAdd([stashTrack(x)]);
+      return;
+    }
+    if (!row || songOpening) return;
+    songOpening = true;
+    row.classList.add("is-busy");
+    const bar = row.querySelector(".kb-pmvg-songbar");
+    try {
+      const f = await openStashSong(row.dataset.spath, { plugin: BACKEND, onProgress: (p) => (bar.style.width = `${Math.round(p * 100)}%`) });
+      if (!alive) return;
+      S.mode = "song";
+      save();
+      paintSegs();
+      paintMode();
+      await loadSong(f);
+    } catch (err) {
+      errorToast(err, "Stash songs");
+    } finally {
+      songOpening = false;
+      row.classList.remove("is-busy");
+      bar.style.width = "0%";
+    }
+  });
+
+  // A library picker that pages. On big screens the list scrolls in its own box and the next page comes in when
+  // "Show more" at its end gets near (or on a click); on phones and touch screens the list is part of the page
+  // (see standalone.css) and grows only on a tap – loading by itself there would push the steps below it ever
+  // further down. load(query, page, perPage) → { scenes, count }; item(scene) → the button's HTML.
+  // Returns search(query), which starts the list over.
+  const PICK_PAGE = 24;
+  function pagedPicker(box, load, item) {
+    let seq = 0;
+    let page = 0;
+    let total = 0;
+    let busy = false;
+    let query = "";
+    const shown = () => box.querySelectorAll(".kb-pmvg-tpl").length;
+    async function more() {
+      if (busy || (page && shown() >= total) || box.hidden) return;
+      busy = true;
+      const my = seq;
+      try {
+        const { scenes, count } = await load(query, page + 1, PICK_PAGE);
+        if (my !== seq || !alive) return;
+        page++;
+        total = count;
+        if (page === 1) box.innerHTML = scenes.length ? "" : `<p class="kb-hint">Nothing found.${S.musicOnly ? " Switch off “Only music videos” to search every video." : ""}</p>`;
+        const btn = box.querySelector("[data-pickmore]");
+        if (btn) {
+          near.unobserve(btn);
+          btn.remove();
+        }
+        box.insertAdjacentHTML("beforeend", scenes.map(item).join(""));
+        if (scenes.length && shown() < total) {
+          box.insertAdjacentHTML("beforeend", `<button type="button" class="kb-btn kb-pmvg-more" data-pickmore>Show more (${fmtNum(shown())} of ${fmtNum(total)})</button>`);
+          if (getComputedStyle(box).overflowY === "auto") near.observe(box.querySelector("[data-pickmore]"));
+        }
+      } catch (err) {
+        if (my === seq) box.innerHTML = `<p class="kb-hint">Couldn't load the list: ${esc(err.message)}</p>`;
+      } finally {
+        if (my === seq) busy = false;
+      }
+    }
+    // (also fires right away when a page doesn't fill the box)
+    const near = new IntersectionObserver((es) => es.some((x) => x.isIntersecting) && more(), { root: box, rootMargin: "300px 0px" });
+    box.addEventListener("click", (e) => {
+      if (e.target.closest("[data-pickmore]")) more();
+    });
+    return (q) => {
+      seq++;
+      busy = false;
+      page = 0;
+      total = 0;
+      query = q || "";
+      box.scrollTop = 0;
+      return more();
+    };
+  }
+
+  // Music from a video in the library: ffmpeg (PMV Generator backend) cuts out the sound
+  let vScene = null;
+  const listVideos = pagedPicker(
+    $("[data-vlist]"),
+    async (q, page, n) => {
+      const ids = S.musicOnly ? await musicTagIds() : [];
+      const d = await gql(`query($f: FindFilterType, $x: SceneFilterType) { findScenes(filter: $f, scene_filter: $x) { count scenes { id title paths { screenshot } files { duration basename } } } }`, {
+        f: { q: q || undefined, page, per_page: n, sort: q ? "title" : "last_played_at", direction: q ? "ASC" : "DESC" },
+        x: ids.length ? { tags: { value: ids, modifier: "INCLUDES" } } : {},
+      });
+      return d.findScenes;
+    },
+    (x) => {
+      const name = x.title || ((x.files[0] || {}).basename || "").replace(/\.[^.]+$/, "") || "Scene " + x.id;
+      const dur = (x.files[0] || {}).duration || 0;
+      return `<button type="button" class="kb-pmvg-tpl" data-vid="${x.id}" data-name="${esc(name)}" data-dur="${dur}">
+                ${x.paths.screenshot ? `<img src="${esc(x.paths.screenshot)}" alt="" loading="lazy">` : ""}
+                <span><b>${esc(name)}</b><small>${esc(fmtDuration(dur))}</small></span></button>`;
+    }
+  );
   function pickVideo(id, name, dur) {
     vScene = { id, name, dur };
     $("[data-vlist]").hidden = true;
     $("[data-vqwrap]").hidden = true;
+    $("[data-vmusic]").hidden = true;
     $("[data-vpick]").hidden = false;
     $("[data-vname]").textContent = name;
     $("[data-vdur]").textContent = dur ? fmtDuration(dur) : "";
@@ -1362,7 +1659,17 @@ export function render(main) {
     $("[data-vpick]").hidden = true;
     $("[data-vlist]").hidden = false;
     $("[data-vqwrap]").hidden = false;
+    $("[data-vmusic]").hidden = false;
     listVideos($("[data-vq]").value.trim());
+  };
+  $("[data-vadd]").onclick = () => {
+    if (!vScene) return;
+    const a = parseTime($("[data-vfrom]").value);
+    const b = parseTime($("[data-vto]").value);
+    if (!(a >= 0) || !(b >= 0) || (b && b <= a)) return toast("From/to don't fit – e.g. 0:45 to 3:30", "error");
+    if ((b || vScene.dur) - a > 20 * 60) return toast("At most 20 minutes of music at once", "error");
+    queueAdd([videoTrack(vScene, a, b && b < vScene.dur - 0.5 ? b : 0, $("[data-vsave]").checked)]);
+    $("[data-vback]").click(); // back to the list for the next video
   };
   $("[data-vgo]").onclick = async () => {
     if (!vScene) return;
@@ -1417,13 +1724,22 @@ export function render(main) {
   main.querySelectorAll("[data-tempo]").forEach((b) => (b.onclick = () => song && ((song = Object.assign(rescale(song, Number(b.dataset.tempo)), { name: song.name })), paintSong())));
   main.querySelectorAll("[data-nudge]").forEach((b) => (b.onclick = () => song && ((song = Object.assign(shift(song, Number(b.dataset.nudge)), { name: song.name })), paintSong())));
 
-  $("[data-start]").onclick = () => {
+  // songs waiting in the song list (Your song / Stash songs): Start loads the list and starts with it
+  const queueReady = () => queue.length > 0 && (S.mode === "song" || S.mode === "stash");
+  $("[data-start]").onclick = async () => {
     if (waiting) return (waiting.cancelled = true);
+    if (queueReady()) {
+      if (queueStarting) return;
+      const b = $("[data-start]");
+      b.disabled = true;
+      b.innerHTML = `${icon("bolt")}Loading the first song …`;
+      if (!(await playQueue(null)) || !alive) return;
+    }
     if (canStart()) startRun();
   };
 
   const canStart = () =>
-    S.mode === "tpl" ? !!tpl : S.mode === "plex" ? !!plex && (S.plexWhat !== "list" || !!S.plexList) : S.mode === "live" ? !!(liveConn && liveSt && liveSt.running) : !!song;
+    queueReady() ? true : S.mode === "stash" ? false : S.mode === "tpl" ? !!tpl : S.mode === "plex" ? !!plex && (S.plexWhat !== "list" || !!S.plexList) : S.mode === "live" ? !!(liveConn && liveSt && liveSt.running) : !!song;
   function paintStart() {
     if (starting) return;
     const ok = canStart();
@@ -1436,7 +1752,7 @@ export function render(main) {
           ? !plex ? "Connect Plex first" : !ok ? "Pick a playlist first" : S.plexWhat === "follow" ? "Start – follow Plex" : "Start"
           : S.mode === "live"
             ? ok ? `Start – listen to ${liveApp()}` : liveErr ? "Listening isn't available" : liveSt ? `Start ${liveApp()} first` : "Connecting …"
-          : ok ? "Start" : "Pick a song first";
+          : queueReady() ? `Start – song list (${queue.length})` : ok ? "Start" : "Pick a song first";
     b.innerHTML = `${icon("bolt")}${label}`;
   }
 
@@ -1822,6 +2138,9 @@ export function render(main) {
     const t = S.mode === "tpl";
     $("[data-tplpane]").hidden = !t;
     $("[data-songpane]").hidden = S.mode !== "song";
+    $("[data-stashpane]").hidden = S.mode !== "stash";
+    if (S.mode === "stash") listSongs();
+    paintQueue();
     $("[data-plexpane]").hidden = S.mode !== "plex";
     $("[data-livepane]").hidden = S.mode !== "live";
     if (S.mode === "plex") paintPlex();
@@ -1833,35 +2152,25 @@ export function render(main) {
   }
   main.querySelector("[data-seg=mode]").addEventListener("click", () => setTimeout(paintMode));
 
-  let listSeq = 0;
-  async function listTemplates(q) {
-    const seq = ++listSeq;
-    const box = $("[data-tplist]");
-    try {
-      // Without a search: scenes tagged "PMV" first, otherwise the newest scenes
-      let filter = {};
-      if (!q) {
-        const t = await gql(`query { findTags(tag_filter: { name: { value: "PMV", modifier: EQUALS } }, filter: { per_page: 1 }) { tags { id } } }`);
-        if (t.findTags.tags[0]) filter = { tags: { value: [t.findTags.tags[0].id], modifier: "INCLUDES" } };
-      }
+  // "Only music videos": scenes with one of the music tags (search included); off: every scene. Newest first.
+  const listTemplates = pagedPicker(
+    $("[data-tplist]"),
+    async (q, page, n) => {
+      const ids = S.musicOnly ? await musicTagIds() : [];
+      const filter = ids.length ? { tags: { value: ids, modifier: "INCLUDES" } } : {};
       const d = await gql(
-        `query($f: FindFilterType, $x: SceneFilterType) { findScenes(filter: $f, scene_filter: $x) { scenes { id title paths { screenshot stream } files { duration basename } } } }`,
-        { f: { q: q || undefined, per_page: 12, sort: "created_at", direction: "DESC" }, x: filter }
+        `query($f: FindFilterType, $x: SceneFilterType) { findScenes(filter: $f, scene_filter: $x) { count scenes { id title paths { screenshot stream } files { duration basename } } } }`,
+        { f: { q: q || undefined, page, per_page: n, sort: "created_at", direction: "DESC" }, x: filter }
       );
-      if (seq !== listSeq || !alive) return;
-      const list = d.findScenes.scenes;
-      box.innerHTML = list.length
-        ? list.map((x) => {
-            const name = x.title || (x.files[0] || {}).basename || "Scene " + x.id;
-            return `<button type="button" class="kb-pmvg-tpl" data-id="${x.id}" data-url="${esc(x.paths.stream)}" data-name="${esc(name)}">
+      return d.findScenes;
+    },
+    (x) => {
+      const name = x.title || (x.files[0] || {}).basename || "Scene " + x.id;
+      return `<button type="button" class="kb-pmvg-tpl" data-id="${x.id}" data-url="${esc(x.paths.stream)}" data-name="${esc(name)}">
               ${x.paths.screenshot ? `<img src="${esc(x.paths.screenshot)}" alt="" loading="lazy">` : ""}
               <span><b>${esc(name)}</b><small>${esc(fmtDuration((x.files[0] || {}).duration || 0))}</small></span></button>`;
-          }).join("")
-        : `<p class="kb-hint">Nothing found.</p>`;
-    } catch (err) {
-      box.innerHTML = `<p class="kb-hint">Couldn't load the list: ${esc(err.message)}</p>`;
     }
-  }
+  );
   let qTimer;
   $("[data-tplq]").addEventListener("input", (e) => {
     clearTimeout(qTimer);
@@ -3616,6 +3925,7 @@ class Generator {
       this.playSource(0);
       this.rebase();
       this.fsStart();
+      this.barStart();
     }
     this.paintTrack();
     const first = this.tpl && this.tpl.events.find((ev) => ev.type === "layout");
@@ -3654,6 +3964,8 @@ class Generator {
         return !!(this.show.paused || this.show.done);
       },
     });
+    if (this.S.fsDevice === "vacuglide" || this.S.fsDevice === "both") this.fsStartVacuglide();
+    if (this.S.fsDevice === "vacuglide") return;
     let told = "";
     this.fsHandy = attachHandy(this.fsClock, { paths: { funscript: "pmv" } }, {
       getVariant: async () => this.fs,
@@ -3668,6 +3980,75 @@ class Generator {
     });
     getHandy().then((h) => h || toast("No Handy connection key – set it in Stash UI → Settings → Interactive", "error")).catch(() => {});
   }
+  // The VacuGlide (instead of or next to The Handy)
+  async fsStartVacuglide() {
+    const token = await vacuglideToken();
+    if (!token) return toast("No VacuGlide device token – set it in the VacuGlide Sync plugin's settings", "error");
+    if (this.done || !this.fsClock) return;
+    let told = "";
+    this.fsVg = attachVacuglide(this.fsClock, {
+      token,
+      getScript: () => this.fs,
+      onState: (d) => {
+        const st = d.state + d.error;
+        if (st === told) return;
+        told = st;
+        if (d.state === "ready") toast("The VacuGlide is ready – the funscript plays with the song", "ok");
+        else if (d.state === "error") toast("The VacuGlide: " + d.error, "error");
+      },
+    });
+  }
+  // ---------- Beat bar (the Beat Bar plugin's themes) over the show ----------
+
+  barBeats() {
+    if (this.S.fsOn && !this.fs) this.fsBuild();
+    return this.S.fsOn && this.fs ? strokeBeats(this.fs) : (this.song.beats || []).slice();
+  }
+  async barStart() {
+    if (!this.S.fsBar || this.S.fsBar === "off" || !this.song.beats) return;
+    const [ok, cfg] = await Promise.all([loadBeatBarThemes(), beatBarSettings()]);
+    if (this.done) return;
+    if (!ok) return toast("Beat bar: the Beat Bar plugin isn't installed or enabled", "error");
+    this.bb = new BeatBar(cfg, this.barBeats());
+    this.bbRec = this.S.fsBar === "rec";
+    if (!this.bbRec) {
+      this.bbCanvas = Object.assign(document.createElement("canvas"), { className: "kb-pmvg-beatbar" });
+      this.stage.insertBefore(this.bbCanvas, this.pool);
+    }
+  }
+  // The bar for this moment: into the picture (recorded), or on its own layer lined up with the picture's bottom
+  barDraw(p) {
+    if (!this.bb) return;
+    if (this.bbRec) {
+      const W = this.canvas.width, H = this.canvas.height;
+      const h = this.bb.height(H);
+      this.g.save();
+      this.g.setTransform(1, 0, 0, 1, 0, 0);
+      this.bb.draw(this.g, 0, Math.round(H - h - H * 0.04), W, h, p);
+      this.g.restore();
+      return;
+    }
+    const c = this.bbCanvas;
+    if (!c) return;
+    // the picture inside the canvas element (it fills the window, the picture is fitted into it)
+    const box = this.canvas.getBoundingClientRect();
+    const s = this.stage.getBoundingClientRect();
+    const k = Math.min(box.width / this.canvas.width, box.height / this.canvas.height);
+    const pw = this.canvas.width * k, ph = this.canvas.height * k;
+    const left = box.left + (box.width - pw) / 2 - s.left, bottom = box.top + (box.height + ph) / 2 - s.top;
+    const h = this.bb.height(ph);
+    const dpr = window.devicePixelRatio || 1;
+    Object.assign(c.style, { left: `${left}px`, top: `${bottom - h - ph * 0.04}px`, width: `${pw}px`, height: `${h}px` });
+    if (c.width !== Math.round(pw * dpr) || c.height !== Math.round(h * dpr)) {
+      c.width = Math.round(pw * dpr);
+      c.height = Math.round(h * dpr);
+    }
+    const ctx = c.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, pw, h);
+    this.bb.draw(ctx, 0, 0, pw, h, p);
+  }
+
   fsEvent(type) {
     if (this.fsClock) this.fsClock.dispatchEvent(new Event(type));
   }
@@ -3846,7 +4227,14 @@ class Generator {
   setSong(song) {
     this.song = song;
     this.setBars();
-    if (this.fsHandy && this.fsBuild()) this.fsHandy.setVariant(this.fs); // playlist: the new song gets its own script
+    if ((this.fsHandy || this.fsVg) && this.fsBuild()) { // playlist: the new song gets its own script
+      if (this.fsHandy) this.fsHandy.setVariant(this.fs);
+      if (this.fsVg) this.fsVg.setVariant(this.fs);
+    }
+    if (this.bb) {
+      if (this.S.fsOn && !this.fsHandy && !this.fsVg) this.fsBuild(); // (no device: not rebuilt above)
+      this.bb.setBeats(this.barBeats());
+    }
     this.lastDrop = -99;
     this.h("name").textContent = song.name;
     this.h("bpm").textContent = `${Math.round(song.bpm)} BPM`;
@@ -4037,7 +4425,9 @@ class Generator {
       this.st.reveal = this.revealing ? { p: Math.max(0, Math.min(1, t / this.reveal.endT)) } : null;
       this.st.leave = this.leave;
       this.comp.draw(this.st);
+      if (this.bbRec) this.barDraw(p); // into the picture, after it is drawn: recorded too
     }
+    if (this.bb && !this.bbRec) this.barDraw(p);
     if (this.live && (!this.hudT || performance.now() - this.hudT > 250)) {
       this.hudT = performance.now();
       this.paintLive();
@@ -4385,6 +4775,11 @@ class Generator {
       this.fsHandy.stop();
       this.fsHandy = null;
     }
+    if (this.fsVg) {
+      this.fsVg.stop();
+      this.fsVg = null;
+    }
+    this.bb = null;
     if (this.music && this.music.follow) this.music.follow.detach();
     cancelAnimationFrame(this.raf);
     try {

@@ -3,3 +3,56 @@
 .kb-solo-bar { display: flex; align-items: center; gap: 12px; padding: 14px var(--pad) 0; }
 .kb-solo-back { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px 6px 8px; border: 1px solid var(--bg-3); border-radius: 6px; color: var(--text-2); font: 500 14px/1 var(--f-label); }
 .kb-solo-back:hover { color: var(--ink); border-color: var(--pink); background: var(--pink); }
+
+/* Library pickers (PMV as template, music from a video): the list scrolls in its own box and loads more near its end */
+.kb-pmvg-tplist { max-height: min(62vh, 640px); overflow-y: auto; overscroll-behavior: contain; padding-right: 4px; }
+.kb-pmvg-more { grid-column: 1 / -1; justify-self: center; margin: 4px 0 2px; }
+/* Phones and touch screens: no box inside the page (a finger on it couldn't scroll the page past it); the page
+   scrolls and the list grows. Two columns instead of one big card per row. */
+@media (max-width: 700px), (pointer: coarse) {
+  .kb-pmvg-tplist { max-height: none; overflow: visible; padding-right: 0; }
+}
+@media (max-width: 520px) {
+  .kb-pmvg-tplist { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .kb-pmvg-tpl span { padding: 6px 8px; }
+  .kb-pmvg-tpl b { font-size: 12.5px; }
+  .kb-pmvg-more { width: 100%; }
+}
+/* Phones: the start card sticks to the bottom (stage.css) – with the heading and saved settings it covered almost
+   half the screen, so only the start button stays there (saved settings are for bigger screens) */
+@media (max-width: 700px) {
+  .kb-pmvg-go { padding: 10px; }
+  .kb-pmvg .kb-pmvg-go > h2, .kb-pmvg .kb-pmvg-go .kb-pmvg-presets { display: none; }
+  .kb-pmvg-go .kb-pmvg-start { width: 100%; margin: 0; }
+}
+
+/* Beat bar over the show (on screen only – "in the recording too" draws into the picture instead) */
+.kb-pmvg-beatbar { position: absolute; z-index: 1; pointer-events: none; }
+
+/* Stash songs: one row per sound file in PMV Generator/Songs */
+.kb-pmvg-songlist { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; max-height: min(62vh, 640px); overflow-y: auto; overscroll-behavior: contain; padding-right: 4px; }
+.kb-pmvg-songrow { position: relative; display: flex; align-items: center; gap: 10px; min-width: 0; padding: 9px 12px; overflow: hidden; border: 1px solid var(--bg-3); border-radius: 6px; color: var(--text); text-align: left; background: var(--base); cursor: pointer; }
+.kb-pmvg-songrow:hover { border-color: var(--pink); }
+.kb-pmvg-songrow > svg { flex: none; color: var(--pink); }
+.kb-pmvg-songrow span { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.kb-pmvg-songrow b { overflow: hidden; font: 600 13.5px/1.3 var(--f-text); white-space: nowrap; text-overflow: ellipsis; }
+.kb-pmvg-songrow small { overflow: hidden; color: var(--faint); font-size: 12px; white-space: nowrap; text-overflow: ellipsis; }
+.kb-pmvg-songrow.is-busy { border-color: var(--pink); cursor: progress; }
+.kb-pmvg-songbar { position: absolute; left: 0; bottom: 0; width: 0; height: 3px; background: var(--pink); transition: width .2s; }
+@media (max-width: 700px), (pointer: coarse) {
+  .kb-pmvg-songlist { max-height: none; overflow: visible; padding-right: 0; }
+}
+.kb-pmvg-songadd { flex: none; margin-left: auto; }
+
+/* Song list: several songs from Stash in a row (under the Music tabs) */
+.kb-pmvg-queue { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--pink); border-radius: 8px; background: var(--base); }
+.kb-pmvg-queuehead { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.kb-pmvg-queuehead b { display: inline-flex; align-items: center; gap: 6px; font: 600 14px/1.3 var(--f-text); }
+.kb-pmvg-queuelist { display: flex; flex-direction: column; gap: 4px; max-height: 220px; margin: 8px 0 0; padding: 0 0 0 22px; overflow-y: auto; }
+.kb-pmvg-queuelist li { padding-left: 2px; }
+.kb-pmvg-queuelist li > * { vertical-align: middle; }
+.kb-pmvg-queuelist li { display: list-item; }
+.kb-pmvg-queuelist li span { display: inline-flex; flex-direction: column; min-width: 0; max-width: calc(100% - 44px); }
+.kb-pmvg-queuelist b { overflow: hidden; font: 500 13px/1.3 var(--f-text); white-space: nowrap; text-overflow: ellipsis; }
+.kb-pmvg-queuelist small { color: var(--faint); font-size: 11.5px; }
+.kb-pmvg-queuelist .kb-btn { float: right; }
